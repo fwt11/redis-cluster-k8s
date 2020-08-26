@@ -1,0 +1,7 @@
+resources:
+- namespace.yaml
+- configmap.yaml
+- rbac.yaml
+- redis.yaml
+- nfs-volume.yaml
+namespace: redis-cluster

@@ -1,0 +1,99 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gen-conf
+data:
+  genconf-redis: |
+    #!/usr/bin/env python3
+    import time
+    import os
+    import sys
+    import re
+    import subprocess
+    import threading
+    from kubernetes import client, config, watch
+    from redis.sentinel import Redis, Sentinel
+    
+    def get_cluster_ips(ip):
+        cli = "redis-cli -c -h {} ".format(ip)
+        cmd = (cli + "cluster nodes").split(" ")
+        print(cmd)
+        pattern = re.compile(".+ (\d+\.\d+\.\d+\.\d+):6379@16379 \w{5,6}")
+        out = subprocess.run(cmd, capture_output=True)
+        lines = out.stdout.decode('utf-8').splitlines()
+        ips = []
+        for line in lines:
+            print(line)
+            match = pattern.match(line)
+            ips.append(match.group(1))
+        return ips
+
+    pod_name = os.getenv("HOSTNAME")
+    pod_ip = os.getenv("POD_IP")
+    data_dir = "/data/redis/{}/".format(pod_name)
+    nodes_conf = data_dir + "nodes.conf"
+
+    print("nodes.conf does not exist, create one.")
+    f = open("/etc/redis/redis.conf", "w")
+    f.write("port 6379\n")
+    f.write("protected-mode no\n")
+    f.write("cluster-enabled yes\n")
+    f.write("cluster-config-file nodes.conf\n")
+    f.write("cluster-node-timeout 500\n")
+    f.write("appendonly yes\n")
+    f.close()
+
+    if not os.path.isfile(nodes_conf):
+        sys.exit(0)
+    
+    old_conf_path = data_dir + "nodes.conf.old"
+    os.rename(nodes_conf, old_conf_path)
+    config.load_incluster_config()
+    v1 = client.CoreV1Api()
+    appsV1 = client.AppsV1Api()
+    pods = v1.list_namespaced_pod("redis-cluster").items
+    pods_ip = [pod.status.pod_ip for pod in pods]
+    print("ips in statefulset {}".format(pods_ip))
+    
+    num_pods = appsV1.read_namespaced_stateful_set(name = "redis", namespace = "redis-cluster").spec.replicas
+    
+    for i in range(num_pods):
+        if cluster_ips := get_cluster_ips("redis-{}.redis-hs.redis-cluster.svc.cluster.local".format(i)):
+            print("found {} in cluster".format(cluster_ips))
+            break
+
+    for ip in cluster_ips:
+        if ip not in pods_ip:
+            print("this ip does not exist.", ip)
+            old_ip = ip
+    
+    f_old_conf = open(old_conf_path, "r")
+    f_nodes_conf = open(nodes_conf, "w")
+
+    lines = f_old_conf.readlines()
+    for line in lines:
+        if old_ip in line:
+            line = line.split(" ")
+            this_id = line[0]
+            print("this redis id ", this_id)
+
+    for line in lines:
+        line = line.split(" ")
+        if this_id in line:
+            current_master_id = line[0]
+    
+    for line in lines:
+        if old_ip in line:
+            f_nodes_conf.write(line.replace(old_ip, pod_ip).replace("master", "slave").replace("-", current_master_id))
+        elif current_master_id in line:
+            f_nodes_conf.write(line.replace("slave", "master").replace(this_id, "-"))
+        else:
+            f_nodes_conf.write(line)
+        
+
+    
+    f_nodes_conf.close()
+    
+    
+
+        
