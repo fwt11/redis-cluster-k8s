@@ -28,10 +28,22 @@ data:
             ips.append(match.group(1))
         return ips
 
+
+
     pod_name = os.getenv("HOSTNAME")
     pod_ip = os.getenv("POD_IP")
     data_dir = "/data/redis/{}/".format(pod_name)
     nodes_conf = data_dir + "nodes.conf"
+
+    config.load_incluster_config()
+    v1 = client.CoreV1Api()
+    appsV1 = client.AppsV1Api()
+    pods = v1.list_namespaced_pod("redis-cluster").items
+    pods_ip = [pod.status.pod_ip for pod in pods]
+    print("ips in statefulset {}".format(pods_ip))
+
+    num_pods_in_statefulset = appsV1.read_namespaced_stateful_set(name = "redis", namespace = "redis-cluster").spec.replicas
+
 
     print("nodes.conf does not exist, create one.")
     f = open("/etc/redis/redis.conf", "w")
@@ -43,21 +55,36 @@ data:
     f.write("appendonly yes\n")
     f.close()
 
+    def start_cluster():
+        r = Redis("localhost", 6379)
+        while True:
+            try:
+                r.ping()
+            except Exception as e:
+                print("error ping: ", e)
+                time.sleep(1)
+                continue
+            break
+        
+        hosts_list = ""
+        for ip in pods_ip:
+            hosts_list += ip + ":6379 "
+        cmd_string = "yes yes | redis-cli --cluster create --cluster-replicas 1 " + hosts_list.strip()
+        print(cmd_string)
+        subprocess.run(cmd_string, shell=True)
+
+
     if not os.path.isfile(nodes_conf):
+        if int(pod_name.split("-")[-1]) == num_pods_in_statefulset - 1:
+            thread = threading.Thread(target = start_cluster)
+            thread.start()
+ 
         sys.exit(0)
     
     old_conf_path = data_dir + "nodes.conf.old"
     os.rename(nodes_conf, old_conf_path)
-    config.load_incluster_config()
-    v1 = client.CoreV1Api()
-    appsV1 = client.AppsV1Api()
-    pods = v1.list_namespaced_pod("redis-cluster").items
-    pods_ip = [pod.status.pod_ip for pod in pods]
-    print("ips in statefulset {}".format(pods_ip))
     
-    num_pods = appsV1.read_namespaced_stateful_set(name = "redis", namespace = "redis-cluster").spec.replicas
-    
-    for i in range(num_pods):
+    for i in range(num_pods_in_statefulset):
         if cluster_ips := get_cluster_ips("redis-{}.redis-hs.redis-cluster.svc.cluster.local".format(i)):
             print("found {} in cluster".format(cluster_ips))
             break
